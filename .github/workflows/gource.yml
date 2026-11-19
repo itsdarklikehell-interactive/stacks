@@ -3,6 +3,12 @@ name: Gource visualization
 on:
   push:
     branches: [main, master]
+    paths-ignore:
+      - "gource.mp4"
+  pull_request:
+    branches: [main, master]
+    paths-ignore:
+      - "gource.mp4"
   workflow_dispatch:
 
 concurrency:
@@ -31,6 +37,7 @@ jobs:
           gource_filename_time: 3
           gource_hide_items: "mouse,date,filenames"
           gource_max_files: 1500
+          gource_file_filter: '(^|/)gource\\.mp4$|(__pycache__|\\.pyc|node_modules|\\.git/)'
           gource_highlight_users: true
           gource_output_framerate: 30
           gource_stop_at_end: true
@@ -43,14 +50,32 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
 
-      - name: Upscale + re-encode
+      - name: Upscale + re-encode with size guard
         run: |
+          set -euo pipefail
+          LIMIT=$((95 * 1024 * 1024))
           ffmpeg -y -i ./gource/gource.mp4 \
             -c:v libx264 -crf 18 -level 4.1 -preset medium -tune film \
             -filter:v "scale=-1:1080" -sws_flags lanczos \
-            -c:a aac -b:a 192k -ar 48000 \
+            -pix_fmt yuv420p -c:a aac -b:a 192k -ar 48000 \
             -movflags +faststart \
             ./gource.mp4
+          size=$(stat -c%s ./gource.mp4)
+          if [ "$size" -gt "$LIMIT" ]; then
+            echo "1080p output is ${size} bytes; retrying at 720p to stay below 95 MiB."
+            ffmpeg -y -i ./gource/gource.mp4 \
+              -c:v libx264 -crf 26 -preset medium -tune film \
+              -vf "scale=-1:720" -sws_flags lanczos \
+              -pix_fmt yuv420p -c:a aac -b:a 128k -ar 48000 \
+              -movflags +faststart \
+              ./gource-720p.mp4
+            mv ./gource-720p.mp4 ./gource.mp4
+            size=$(stat -c%s ./gource.mp4)
+          fi
+          if [ "$size" -gt "$LIMIT" ]; then
+            echo "::error::Generated video remains above 95 MiB after 720p fallback."
+            exit 1
+          fi
 
       - name: Upload gource video
         uses: actions/upload-artifact@v4
@@ -60,6 +85,7 @@ jobs:
           retention-days: 30
 
       - name: Commit gource video
+        if: github.event_name != 'pull_request'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
